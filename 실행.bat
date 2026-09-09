@@ -1,21 +1,52 @@
 @echo off
-chcp 65001 > nul
-where node > nul 2>&1
-if errorlevel 1 (
-  echo Node.js가 필요합니다. https://nodejs.org 에서 설치한 뒤 다시 실행해 주세요.
-  pause
-  exit /b 1
-)
+setlocal
+cd /d "%~dp0"
 
+set "CODEX_PNPM=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd"
+
+if exist "%CODEX_PNPM%" goto run_codex_pnpm
+where pnpm.cmd >nul 2>nul
+if not errorlevel 1 goto run_pnpm
+where npm.cmd >nul 2>nul
+if not errorlevel 1 goto run_npm
+
+echo Node.js and npm are required.
+echo Install Node.js from https://nodejs.org and run this file again.
+pause
+exit /b 1
+
+:open_browser
+start "" /b powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process 'http://localhost:3000'"
+exit /b 0
+
+:run_codex_pnpm
+call :open_browser
+call "%CODEX_PNPM%" dev
+goto finish
+
+:run_pnpm
+call :open_browser
+call pnpm.cmd dev
+goto finish
+
+:run_npm
 if not exist node_modules (
-  echo 필요한 파일을 설치합니다...
-  call npm install
-  if errorlevel 1 (
-    echo 설치하지 못했습니다. 인터넷 연결을 확인해 주세요.
-    pause
-    exit /b 1
-  )
+  echo Installing required packages...
+  call npm.cmd install
+  if errorlevel 1 goto install_failed
 )
+call :open_browser
+call npm.cmd run dev
+goto finish
 
-start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 4; Start-Process 'http://localhost:3000'"
-call npm run dev
+:install_failed
+echo Package installation failed. Check your internet connection.
+pause
+exit /b 1
+
+:finish
+if errorlevel 1 (
+  echo The app could not start. Copy this window and send it to Codex.
+  pause
+)
+endlocal
