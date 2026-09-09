@@ -1,4 +1,4 @@
-name: Deploy private-data PDF tool to Pages
+name: Deploy local-only PDF tool to Pages
 
 on:
   push:
