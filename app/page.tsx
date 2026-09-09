@@ -31,7 +31,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
-  extractJapanesePdf,
+  extractJapaneseSource,
   type ExtractionMode,
   type ExtractionProgress,
   type ExtractionResult,
@@ -62,7 +62,7 @@ function formatBytes(bytes: number) {
 function downloadName(filename: string) {
   const sanitized = filename
     .normalize('NFC')
-    .replace(/\.pdf$/i, '')
+    .replace(/\.(?:pdf|png|jpe?g)$/i, '')
     .replace(/[<>:"/\\|?*]/g, '_');
   const stem = Array.from(sanitized, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -76,13 +76,15 @@ function downloadName(filename: string) {
 function readableError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (/password/i.test(message)) return '비밀번호로 잠긴 PDF는 먼저 잠금을 해제한 뒤 다시 시도해 주세요.';
-  if (/PDF_SIZE_NOT_ALLOWED/i.test(message)) return '비어 있거나 100MB를 넘는 파일은 처리할 수 없습니다.';
-  if (/INVALID_PDF_SIGNATURE|invalid pdf/i.test(message)) return '유효한 PDF 파일이 아닙니다.';
+  if (/PDF_SIZE_NOT_ALLOWED|SOURCE_SIZE_NOT_ALLOWED/i.test(message)) return '비어 있거나 100MB를 넘는 파일은 처리할 수 없습니다.';
+  if (/INVALID_PDF_SIGNATURE|INVALID_IMAGE_SIGNATURE|INVALID_SOURCE_SIGNATURE|invalid pdf/i.test(message)) return '유효한 PDF, PNG 또는 JPG 파일이 아닙니다.';
+  if (/IMAGE_DIMENSIONS_NOT_ALLOWED/i.test(message)) return '이미지 해상도가 너무 큽니다. 가로·세로 16,384픽셀 및 총 6천만 픽셀 이하로 줄여 주세요.';
+  if (/IMAGE_DECODE_FAILED/i.test(message)) return '이미지를 열지 못했습니다. 손상되지 않은 PNG 또는 JPG인지 확인해 주세요.';
   if (/PDF_PAGE_LIMIT/i.test(message)) return '페이지 수가 너무 많습니다. 2,000쪽 이하로 나눈 뒤 다시 시도해 주세요.';
   if (/fetch|network|load language|worker|ocr/i.test(message)) {
     return '내장 일본어 OCR 구성 요소를 불러오지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.';
   }
-  return 'PDF를 처리하지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.';
+  return '파일을 처리하지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.';
 }
 
 export default function Home() {
@@ -111,7 +113,7 @@ export default function Home() {
     setText('');
     setProgress({ page: 0, total: 0, percent: 1, stage: 'analyzing', detail: '파일을 여는 중' });
     try {
-      const extracted = await extractJapanesePdf(target, nextSettings, setProgress);
+      const extracted = await extractJapaneseSource(target, nextSettings, setProgress);
       if (!extracted.text) throw new Error('추출할 수 있는 문자가 없습니다');
       setResult(extracted);
       setText(extracted.text);
@@ -124,15 +126,14 @@ export default function Home() {
 
   const acceptFile = useCallback((nextFile: File | undefined) => {
     if (!nextFile) return;
-    const hasPdfName = nextFile.name.toLowerCase().endsWith('.pdf');
-    const hasAllowedType = !nextFile.type || nextFile.type === 'application/pdf';
-    if (!hasPdfName || !hasAllowedType) {
-      setError('PDF 파일만 선택할 수 있습니다.');
+    const hasAllowedName = /\.(?:pdf|png|jpe?g)$/i.test(nextFile.name);
+    if (!hasAllowedName) {
+      setError('PDF, PNG 또는 JPG 파일만 선택할 수 있습니다.');
       setStage('error');
       return;
     }
     if (nextFile.size > 100 * 1024 * 1024) {
-      setError('파일이 100MB를 넘습니다. PDF를 나누거나 용량을 줄인 뒤 다시 시도해 주세요.');
+      setError('파일이 100MB를 넘습니다. 파일을 나누거나 용량을 줄인 뒤 다시 시도해 주세요.');
       setStage('error');
       return;
     }
@@ -181,6 +182,7 @@ export default function Home() {
 
   const characterCount = useMemo(() => Array.from(text).length, [text]);
   const isWorking = stage === 'working';
+  const selectedFileIsImage = Boolean(file && /\.(?:png|jpe?g)$/i.test(file.name));
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -190,7 +192,7 @@ export default function Home() {
             <span className="grid size-10 place-items-center rounded-sm bg-vermilion text-lg font-bold text-white">縦</span>
             <span>
               <span className="block font-display text-lg font-semibold tracking-tight">縦読み</span>
-              <span className="block text-xs text-muted-foreground">일본어 세로쓰기 PDF 추출기</span>
+              <span className="block text-xs text-muted-foreground">일본어 세로쓰기 PDF·이미지 추출기</span>
             </span>
           </button>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -214,7 +216,7 @@ export default function Home() {
               깔끔한 일본어 텍스트로
             </h1>
             <p className="mt-5 max-w-lg text-base leading-7 text-muted-foreground sm:text-lg">
-              PDF의 글자 위치를 분석해 세로쓰기 순서로 재배열합니다. 텍스트 PDF와 스캔 PDF를 자동으로 구분합니다.
+              PDF의 글자 위치를 분석해 세로쓰기 순서로 재배열합니다. 스캔 PDF와 PNG·JPG 이미지는 내장 OCR로 읽습니다.
             </p>
             <dl className="mt-8 grid grid-cols-3 gap-3 border-t border-ink/10 pt-5 text-sm">
               <div><dt className="text-muted-foreground">방향</dt><dd className="mt-1 font-semibold">右 → 左</dd></div>
@@ -228,7 +230,7 @@ export default function Home() {
             <div className="relative rounded-md border border-ink/15 bg-card p-4 shadow-[0_24px_70px_rgba(35,31,28,.09)] sm:p-6">
               <button
                 type="button"
-                aria-label="PDF 파일 선택"
+                aria-label="PDF 또는 이미지 파일 선택"
                 className={`group grid min-h-[320px] w-full place-items-center rounded-sm border border-dashed p-8 text-center transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-vermilion focus-visible:ring-offset-4 ${isDragging ? 'border-vermilion bg-vermilion/[.055]' : 'border-ink/25 bg-paper/55 hover:border-vermilion hover:bg-vermilion/[.025]'}`}
                 onClick={() => fileInputRef.current?.click()}
                 onDragEnter={(event) => { event.preventDefault(); setIsDragging(true); }}
@@ -244,10 +246,10 @@ export default function Home() {
                   <span className="mx-auto grid size-16 place-items-center rounded-full border border-ink/10 bg-card text-vermilion shadow-sm transition group-hover:-translate-y-1">
                     <Upload className="size-7" strokeWidth={1.7} />
                   </span>
-                  <span className="mt-6 block font-display text-xl font-semibold">PDF를 여기에 놓으세요</span>
+                  <span className="mt-6 block font-display text-xl font-semibold">PDF·PNG·JPG를 여기에 놓으세요</span>
                   <span className="mt-2 block text-sm leading-6 text-muted-foreground">또는 눌러서 파일 선택 · 최대 100MB</span>
                   <span className="mt-6 inline-flex h-9 items-center justify-center gap-2 rounded-sm bg-ink px-6 text-sm font-medium text-paper transition group-hover:bg-vermilion">
-                    <FileText className="size-4" /> PDF 선택
+                    <FileText className="size-4" /> PDF / 이미지 선택
                   </span>
                 </span>
               </button>
@@ -268,7 +270,7 @@ export default function Home() {
               </div>
             </div>
             <Button variant="outline" className="rounded-sm" onClick={reset} disabled={isWorking}>
-              <RotateCcw className="size-4" /> 다른 PDF
+              <RotateCcw className="size-4" /> 다른 파일
             </Button>
           </div>
 
@@ -286,7 +288,7 @@ export default function Home() {
                       <SelectItem value="ocr">모든 페이지 OCR</SelectItem>
                     </SelectContent>
                   </Select>
-                  <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">자동은 글자가 없는 페이지만 OCR합니다.</span>
+                  <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">자동은 글자가 없는 PDF 페이지만 OCR하며, 이미지는 항상 OCR합니다.</span>
                 </div>
 
                 <div>
@@ -313,13 +315,13 @@ export default function Home() {
                   <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">괄호 모드(텍스트 PDF): 漢字（かんじ）</span>
                 </div>
                 <SettingSwitch label="세로 본문만" description="가로 머리말·쪽 번호를 제외합니다." checked={settings.verticalOnly} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, verticalOnly: checked }))} />
-                <SettingSwitch label="페이지 사이 띄우기" description="쪽 사이에 빈 줄을 넣습니다." checked={settings.pageBreaks} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, pageBreaks: checked }))} />
+                <SettingSwitch label="페이지 사이 띄우기" description="이어지는 문장은 붙이고, 나머지 쪽 사이에 빈 줄을 넣습니다." checked={settings.pageBreaks} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, pageBreaks: checked }))} />
               </div>
 
               <Button className="mt-6 w-full rounded-sm bg-ink text-paper hover:bg-vermilion" disabled={isWorking} onClick={() => void runExtraction(file, settings)}>
                 <RefreshCw className={`size-4 ${isWorking ? 'animate-spin' : ''}`} /> 설정으로 다시 추출
               </Button>
-              <p className="mt-3 text-xs leading-5 text-muted-foreground">PDF와 추출 결과는 브라우저 메모리에서만 처리되며 업로드·저장되지 않습니다.</p>
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">파일과 추출 결과는 브라우저 메모리에서만 처리되며 업로드·저장되지 않습니다.</p>
             </aside>
 
             <section className="min-w-0 rounded-md border border-ink/10 bg-card p-5 sm:p-6">
@@ -331,7 +333,7 @@ export default function Home() {
                     <p aria-live="polite" className="mt-2 text-sm leading-6 text-muted-foreground">{progress.detail}</p>
                     <Progress value={progress.percent} className="mt-6 [&_[data-slot=progress-indicator]]:bg-vermilion" />
                     <div className="mt-2 flex justify-between text-xs text-muted-foreground">
-                      <span>{progress.total ? `${progress.page} / ${progress.total}쪽` : '분석 중'}</span>
+                      <span>{progress.total ? `${progress.page} / ${progress.total}${selectedFileIsImage ? '장' : '쪽'}` : '분석 중'}</span>
                       <span>{progress.percent}%</span>
                     </div>
                   </div>
@@ -355,7 +357,7 @@ export default function Home() {
                     <div>
                       <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-emerald-700 text-white"><Check className="size-3.5" /></span><h2 className="font-semibold">추출된 텍스트</h2></div>
                       <p className="mt-2 text-xs text-muted-foreground">
-                        {result.pages}쪽 · {characterCount.toLocaleString()}자 · 텍스트 {result.textPages}쪽{result.ocrPages ? ` · OCR ${result.ocrPages}쪽` : ''}{result.furiganaCharacters ? ` · 후리가나 ${result.furiganaCharacters}자 ${settings.furiganaMode === 'omit' ? '제외' : '표시'}` : ''}
+                        {result.pages}{result.sourceKind === 'image' ? '장' : '쪽'} · {characterCount.toLocaleString()}자{result.sourceKind === 'pdf' ? ` · 텍스트 ${result.textPages}쪽${result.ocrPages ? ` · OCR ${result.ocrPages}쪽` : ''}` : ' · 이미지 OCR'}{result.furiganaCharacters ? ` · 후리가나 ${result.furiganaCharacters}자 ${settings.furiganaMode === 'omit' ? '제외' : '표시'}` : ''}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -386,9 +388,9 @@ export default function Home() {
         </section>
       )}
 
-      <input ref={fileInputRef} className="sr-only" type="file" accept="application/pdf,.pdf" onChange={(event) => acceptFile(event.target.files?.[0])} />
+      <input ref={fileInputRef} className="sr-only" type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" onChange={(event) => acceptFile(event.target.files?.[0])} />
       <footer className="mx-auto flex max-w-7xl items-center justify-between border-t border-ink/10 px-5 py-5 text-xs text-muted-foreground sm:px-8 lg:px-10">
-        <span>텍스트 레이어 우선 · 필요할 때만 OCR</span><span>縦書き対応</span>
+        <span>텍스트 레이어 우선 · 이미지/스캔 OCR</span><span>縦書き対応</span>
       </footer>
     </main>
   );
