@@ -298,6 +298,7 @@ export default function Home() {
                       <SelectItem value="columns">세로 열마다 줄바꿈</SelectItem>
                     </SelectContent>
                   </Select>
+                  <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">끝까지 찬 세로 열은 다음 열과 이어 붙이고, 실제 문단만 줄을 바꿉니다.</span>
                 </div>
 
                 <div className="border-t border-ink/10 pt-4">

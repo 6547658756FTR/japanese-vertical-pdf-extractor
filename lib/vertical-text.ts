@@ -49,6 +49,11 @@ function countJapanese(text: string) {
   return Array.from(text).filter((char) => japaneseChar.test(char)).length;
 }
 
+function estimatedTokenBottom(token: TextToken) {
+  const visibleCharacters = Math.max(1, countVisible(token.text));
+  return token.y - Math.max(token.height, token.fontSize * visibleCharacters);
+}
+
 export function normalizeJapaneseText(value: string) {
   let text = value.normalize('NFC');
   text = Array.from(text, (char) => verticalPunctuation[char] ?? char).join('');
@@ -242,14 +247,24 @@ export function orderVerticalPage(
     return {
       text: normalizeJapaneseText(text),
       top: Math.max(...ordered.map((token) => token.y)),
+      bottom: Math.min(...ordered.map(estimatedTokenBottom)),
     };
   }).filter((column) => column.text.length);
 
+  const renderedBottom = quantile(rendered.map((column) => column.bottom), 0.2);
+  const contentHeight = Math.max(referenceSize, pageTop - renderedBottom);
   let text = '';
   rendered.forEach((column, index) => {
     if (index > 0) {
-      const startsIndented = pageTop - column.top > referenceSize * 0.7;
-      text += options.layout === 'columns' || startsIndented ? '\n' : '';
+      const previous = rendered[index - 1];
+      const startsAtContentTop = pageTop - column.top <= referenceSize * 0.6;
+      const previousReachedBottom = previous.bottom - renderedBottom <= referenceSize * 1.2;
+      const previousFilledColumn = previous.top - previous.bottom
+        >= Math.max(referenceSize * 6, contentHeight * 0.72);
+      const isAutomaticColumnWrap = startsAtContentTop
+        && previousReachedBottom
+        && previousFilledColumn;
+      if (options.layout === 'columns' || !isAutomaticColumnWrap) text += '\n';
     }
     text += column.text;
   });
