@@ -40,6 +40,12 @@ jobs:
         env:
           GITHUB_PAGES: 'true'
 
+      # Vinext preserves Next.js' basePath as an output directory. GitHub
+      # Pages already mounts this artifact at that base path, so copy the
+      # generated route and its _next assets to the artifact root.
+      - name: Prepare project-site artifact root
+        run: cp -a "dist/client/${GITHUB_REPOSITORY#*/}/." dist/client/
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
