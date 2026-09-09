@@ -9,6 +9,14 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="ko">
+      <head>
+        <meta
+          httpEquiv="Content-Security-Policy"
+          content="default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'"
+        />
+        <meta name="referrer" content="no-referrer" />
+        <meta name="robots" content="noindex, nofollow, noarchive" />
+      </head>
       <body>{children}</body>
     </html>
   );

@@ -2,7 +2,6 @@
 
 import {
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +16,7 @@ import {
   RefreshCw,
   RotateCcw,
   ScanText,
+  TextQuote,
   Upload,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -37,26 +37,18 @@ import {
   type ExtractionResult,
   type ExtractSettings,
 } from '@/lib/pdf-extractor';
-import type { LayoutMode } from '@/lib/vertical-text';
+import {
+  addCornerQuoteBoundaryBreaks,
+  keepCornerQuotesOnOneLine,
+  type FuriganaMode,
+  type LayoutMode,
+} from '@/lib/vertical-text';
 
 type AppStage = 'idle' | 'working' | 'done' | 'error';
 
-type ToolDefinition = {
-  name: string;
-  title: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  annotations: { readOnlyHint: boolean; untrustedContentHint: boolean };
-  execute: () => unknown;
-};
-
-type ModelContext = {
-  registerTool(tool: ToolDefinition, options?: { signal?: AbortSignal }): void | Promise<void>;
-};
-
 const initialSettings: ExtractSettings = {
   mode: 'auto',
-  removeRuby: true,
+  furiganaMode: 'omit',
   verticalOnly: true,
   pageBreaks: true,
   layout: 'paragraphs',
@@ -68,21 +60,33 @@ function formatBytes(bytes: number) {
 }
 
 function downloadName(filename: string) {
-  return `${filename.replace(/\.pdf$/i, '')}_세로쓰기.txt`;
+  const sanitized = filename
+    .normalize('NFC')
+    .replace(/\.pdf$/i, '')
+    .replace(/[<>:"/\\|?*]/g, '_');
+  const stem = Array.from(sanitized, (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || codePoint === 127 ? '_' : character;
+  }).join('')
+    .replace(/[. ]+$/g, '')
+    .slice(0, 100);
+  return `${stem || '추출결과'}_세로쓰기.txt`;
 }
 
 function readableError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (/password/i.test(message)) return '비밀번호로 잠긴 PDF는 먼저 잠금을 해제한 뒤 다시 시도해 주세요.';
-  if (/fetch|network|load language|worker/i.test(message)) {
-    return '일본어 OCR 모델을 불러오지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.';
+  if (/PDF_SIZE_NOT_ALLOWED/i.test(message)) return '비어 있거나 100MB를 넘는 파일은 처리할 수 없습니다.';
+  if (/INVALID_PDF_SIGNATURE|invalid pdf/i.test(message)) return '유효한 PDF 파일이 아닙니다.';
+  if (/PDF_PAGE_LIMIT/i.test(message)) return '페이지 수가 너무 많습니다. 2,000쪽 이하로 나눈 뒤 다시 시도해 주세요.';
+  if (/fetch|network|load language|worker|ocr/i.test(message)) {
+    return '내장 일본어 OCR 구성 요소를 불러오지 못했습니다. 페이지를 새로고침한 뒤 다시 시도해 주세요.';
   }
-  return `PDF를 처리하지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요. (${message})`;
+  return 'PDF를 처리하지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.';
 }
 
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const latestRef = useRef({ stage: 'idle' as AppStage, filename: '', text: '' });
   const [file, setFile] = useState<File | null>(null);
   const [stage, setStage] = useState<AppStage>('idle');
   const [settings, setSettings] = useState<ExtractSettings>(initialSettings);
@@ -98,34 +102,6 @@ export default function Home() {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-
-  useEffect(() => {
-    latestRef.current = { stage, filename: file?.name ?? '', text };
-  }, [file, stage, text]);
-
-  useEffect(() => {
-    const context = (document as Document & { modelContext?: ModelContext }).modelContext;
-    if (!context?.registerTool) return;
-    const lifecycle = new AbortController();
-    const tool: ToolDefinition = {
-      name: 'read_extracted_text',
-      title: '추출된 텍스트 읽기',
-      description: '현재 화면에서 변환이 끝난 일본어 PDF 텍스트와 파일 이름을 읽습니다.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      annotations: { readOnlyHint: true, untrustedContentHint: true },
-      execute() {
-        const current = latestRef.current;
-        if (current.stage !== 'done') throw new Error('아직 추출된 텍스트가 없습니다.');
-        return { filename: current.filename, text: current.text };
-      },
-    };
-    try {
-      void Promise.resolve(context.registerTool(tool, { signal: lifecycle.signal })).catch(() => undefined);
-    } catch {
-      // WebMCP is optional; the visible app remains fully functional without it.
-    }
-    return () => lifecycle.abort();
-  }, []);
 
   const runExtraction = useCallback(async (target: File, nextSettings: ExtractSettings) => {
     setStage('working');
@@ -148,7 +124,9 @@ export default function Home() {
 
   const acceptFile = useCallback((nextFile: File | undefined) => {
     if (!nextFile) return;
-    if (nextFile.type !== 'application/pdf' && !nextFile.name.toLowerCase().endsWith('.pdf')) {
+    const hasPdfName = nextFile.name.toLowerCase().endsWith('.pdf');
+    const hasAllowedType = !nextFile.type || nextFile.type === 'application/pdf';
+    if (!hasPdfName || !hasAllowedType) {
       setError('PDF 파일만 선택할 수 있습니다.');
       setStage('error');
       return;
@@ -173,21 +151,33 @@ export default function Home() {
   }, []);
 
   const copyText = useCallback(async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
+    const safeText = keepCornerQuotesOnOneLine(text);
+    setText(safeText);
+    try {
+      await navigator.clipboard.writeText(safeText);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setError('클립보드 권한이 없어 복사하지 못했습니다. 결과를 직접 선택해 복사해 주세요.');
+    }
   }, [text]);
 
   const downloadText = useCallback(() => {
     if (!file) return;
-    const blob = new Blob([`\ufeff${text}`], { type: 'text/plain;charset=utf-8' });
+    const safeText = keepCornerQuotesOnOneLine(text);
+    setText(safeText);
+    const blob = new Blob([`\ufeff${safeText}`], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = downloadName(file.name);
     anchor.click();
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }, [file, text]);
+
+  const addQuoteBreaks = useCallback(() => {
+    setText((current) => addCornerQuoteBoundaryBreaks(current));
+  }, []);
 
   const characterCount = useMemo(() => Array.from(text).length, [text]);
   const isWorking = stage === 'working';
@@ -310,7 +300,17 @@ export default function Home() {
                   </Select>
                 </div>
 
-                <SettingSwitch label="후리가나 제거" description="작은 글자의 루비를 제외합니다." checked={settings.removeRuby} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, removeRuby: checked }))} />
+                <div className="border-t border-ink/10 pt-4">
+                  <span className="mb-2 block text-sm font-medium">후리가나 처리</span>
+                  <Select value={settings.furiganaMode} onValueChange={(value) => setSettings((current) => ({ ...current, furiganaMode: value as FuriganaMode }))} disabled={isWorking}>
+                    <SelectTrigger className="h-10 w-full rounded-sm bg-paper"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="omit">제거</SelectItem>
+                      <SelectItem value="parentheses">괄호로 표시</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">괄호 모드(텍스트 PDF): 漢字（かんじ）</span>
+                </div>
                 <SettingSwitch label="세로 본문만" description="가로 머리말·쪽 번호를 제외합니다." checked={settings.verticalOnly} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, verticalOnly: checked }))} />
                 <SettingSwitch label="페이지 사이 띄우기" description="쪽 사이에 빈 줄을 넣습니다." checked={settings.pageBreaks} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, pageBreaks: checked }))} />
               </div>
@@ -318,7 +318,7 @@ export default function Home() {
               <Button className="mt-6 w-full rounded-sm bg-ink text-paper hover:bg-vermilion" disabled={isWorking} onClick={() => void runExtraction(file, settings)}>
                 <RefreshCw className={`size-4 ${isWorking ? 'animate-spin' : ''}`} /> 설정으로 다시 추출
               </Button>
-              <p className="mt-3 text-xs leading-5 text-muted-foreground">OCR을 처음 사용할 때 일본어 모델을 내려받습니다. PDF 이미지는 외부로 전송되지 않습니다.</p>
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">PDF와 추출 결과는 브라우저 메모리에서만 처리되며 업로드·저장되지 않습니다.</p>
             </aside>
 
             <section className="min-w-0 rounded-md border border-ink/10 bg-card p-5 sm:p-6">
@@ -354,10 +354,13 @@ export default function Home() {
                     <div>
                       <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-emerald-700 text-white"><Check className="size-3.5" /></span><h2 className="font-semibold">추출된 텍스트</h2></div>
                       <p className="mt-2 text-xs text-muted-foreground">
-                        {result.pages}쪽 · {characterCount.toLocaleString()}자 · 텍스트 {result.textPages}쪽{result.ocrPages ? ` · OCR ${result.ocrPages}쪽` : ''}{result.removedRuby ? ` · 후리가나 ${result.removedRuby}자 제외` : ''}
+                        {result.pages}쪽 · {characterCount.toLocaleString()}자 · 텍스트 {result.textPages}쪽{result.ocrPages ? ` · OCR ${result.ocrPages}쪽` : ''}{result.furiganaCharacters ? ` · 후리가나 ${result.furiganaCharacters}자 ${settings.furiganaMode === 'omit' ? '제외' : '표시'}` : ''}
                       </p>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" className="rounded-sm" onClick={addQuoteBreaks} title="「 앞과 」 뒤에 빠진 줄바꿈을 넣습니다">
+                        <TextQuote className="size-4" /> 「」 앞뒤 줄바꿈
+                      </Button>
                       <Button variant="outline" className="rounded-sm" onClick={() => void copyText()}>
                         {copied ? <Check className="size-4" /> : <Clipboard className="size-4" />} {copied ? '복사됨' : '복사'}
                       </Button>
@@ -374,7 +377,7 @@ export default function Home() {
                     spellCheck={false}
                     className="min-h-[500px] resize-y rounded-sm border-ink/15 bg-paper/65 p-5 font-display text-base leading-8 shadow-inner focus-visible:border-vermilion focus-visible:ring-vermilion/30"
                   />
-                  <p className="mt-3 text-xs leading-5 text-muted-foreground">결과를 직접 고친 뒤 복사하거나 저장할 수 있습니다. 인용문·표·복잡한 혼합 조판은 원문과 대조해 주세요.</p>
+                  <p className="mt-3 text-xs leading-5 text-muted-foreground">기본 규칙으로 「부터 」까지는 한 줄로 유지됩니다. 결과를 직접 고친 뒤 복사하거나 저장할 수 있습니다.</p>
                 </>
               )}
             </section>

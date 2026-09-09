@@ -29,6 +29,10 @@
     "build/**",
     "dist/**",
     "coverage/**",
+    "components/ui/**",
+    "hooks/**",
+    "public/pdf.worker.min.mjs",
+    "public/tesseract/**",
     "next-env.d.ts"
   ],
   "rules": {

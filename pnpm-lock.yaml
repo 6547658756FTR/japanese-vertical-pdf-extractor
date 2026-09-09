@@ -14,6 +14,9 @@ importers:
       '@shadcn/react':
         specifier: 0.3.0
         version: 0.3.0(@types/react@19.2.14)(react@19.2.6)
+      '@tesseract.js-data/jpn_vert':
+        specifier: ^1.0.0
+        version: 1.0.0
       class-variance-authority:
         specifier: 0.7.1
         version: 0.7.1
@@ -1518,6 +1521,9 @@ packages:
 
   '@tailwindcss/postcss@4.2.1':
     resolution: {integrity: sha512-OEwGIBnXnj7zJeonOh6ZG9woofIjGrd2BORfvE5p9USYKDCZoQmfqLcfNiRWoJlRWLdNPn2IgVZuWAOM4iTYMw==}
+
+  '@tesseract.js-data/jpn_vert@1.0.0':
+    resolution: {integrity: sha512-xk3ZHTCFODXUH/QVVlOt9lAkis95muL+Fhqe4i6qWxySXuvUp3nDnG8TpzA63YI+RP//lXqbSCBizqvC2fJqoA==}
 
   '@ts-morph/common@0.27.0':
     resolution: {integrity: sha512-Wf29UqxWDpc+i61k3oIOzcUfQt79PIT9y/MWfAGlrkjg6lBC1hwDECLXPVJAhWjiGbfBCxZd65F/LIZF3+jeJQ==}
@@ -4702,6 +4708,8 @@ snapshots:
       '@tailwindcss/oxide': 4.2.1
       postcss: 8.5.28
       tailwindcss: 4.2.1
+
+  '@tesseract.js-data/jpn_vert@1.0.0': {}
 
   '@ts-morph/common@0.27.0':
     dependencies:
