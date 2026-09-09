@@ -46,6 +46,12 @@ type PdfTextItem = {
 const MAX_PDF_BYTES = 100 * 1024 * 1024;
 const MAX_PDF_PAGES = 2_000;
 
+function clearBytes(bytes: Uint8Array) {
+  // PDF.js transfers the underlying buffer to its worker in browsers. A
+  // transferred buffer is already inaccessible here and cannot be overwritten.
+  if (bytes.byteLength > 0) bytes.fill(0);
+}
+
 function isTextItem(item: unknown): item is PdfTextItem {
   if (!item || typeof item !== 'object') return false;
   const value = item as Partial<PdfTextItem>;
@@ -119,7 +125,7 @@ export async function extractJapanesePdf(
   const data = new Uint8Array(await file.arrayBuffer());
   const signature = String.fromCharCode(...data.subarray(0, 5));
   if (signature !== '%PDF-') {
-    data.fill(0);
+    clearBytes(data);
     throw new Error('INVALID_PDF_SIGNATURE');
   }
 
@@ -214,7 +220,7 @@ export async function extractJapanesePdf(
       try {
         await loadingTask.destroy();
       } finally {
-        data.fill(0);
+        clearBytes(data);
       }
     }
   }
