@@ -390,7 +390,8 @@ export default function Home() {
 
       <input ref={fileInputRef} className="sr-only" type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" onChange={(event) => acceptFile(event.target.files?.[0])} />
       <footer className="mx-auto flex max-w-7xl items-center justify-between border-t border-ink/10 px-5 py-5 text-xs text-muted-foreground sm:px-8 lg:px-10">
-        <span>텍스트 레이어 우선 · 이미지/스캔 OCR</span><span>縦書き対応</span>
+        <span>텍스트 레이어 우선 · 이미지/스캔 OCR</span>
+        <span>최종 업데이트 · v1.0.0</span>
       </footer>
     </main>
   );
