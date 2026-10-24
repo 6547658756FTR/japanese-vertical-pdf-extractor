@@ -53,6 +53,8 @@ const MAX_PDF_PAGES = 2_000;
 const MAX_IMAGE_DIMENSION = 16_384;
 const MAX_IMAGE_PIXELS = 60_000_000;
 const MAX_OCR_DIMENSION = 4_000;
+const MIN_OCR_LONG_EDGE = 2_600;
+const OCR_BORDER_PIXELS = 24;
 
 const PAGE_SENTENCE_END = /[。．.!！?？」』）】〉》〕］]$/u;
 const PAGE_CLOSING_PUNCTUATION = /^[、。，．!！?？：；」』）】〉》〕］]/u;
@@ -218,8 +220,8 @@ async function ocrPage(
   pageLayout: PageLayoutMode,
 ) {
   const base = page.getViewport({ scale: 1 });
-  const maxDimension = 3200;
-  const scale = Math.min(3, Math.max(1.8, maxDimension / Math.max(base.width, base.height)));
+  const maxDimension = 4000;
+  const scale = Math.min(3.6, Math.max(2.2, maxDimension / Math.max(base.width, base.height)));
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
   canvas.width = Math.ceil(viewport.width);
@@ -238,6 +240,25 @@ async function ocrPage(
   }
 }
 
+function addOcrBorder(source: HTMLCanvasElement) {
+  const canvas = document.createElement('canvas');
+  canvas.width = source.width + OCR_BORDER_PIXELS * 2;
+  canvas.height = source.height + OCR_BORDER_PIXELS * 2;
+  const context = canvas.getContext('2d', { alpha: false });
+  if (!context) throw new Error('OCR 이미지를 준비할 수 없습니다.');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(source, OCR_BORDER_PIXELS, OCR_BORDER_PIXELS);
+  return canvas;
+}
+
+function disposeCanvas(canvas: HTMLCanvasElement) {
+  const context = canvas.getContext('2d');
+  context?.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.width = 1;
+  canvas.height = 1;
+}
+
 async function recognizeOcrCanvas(
   canvas: HTMLCanvasElement,
   worker: { recognize(image: HTMLCanvasElement): Promise<{ data: { text: string } }> },
@@ -245,8 +266,13 @@ async function recognizeOcrCanvas(
   pageLayout: PageLayoutMode,
 ) {
   if (pageLayout === 'single') {
-    const result = await worker.recognize(canvas);
-    return cleanOcrText(result.data.text, layout);
+    const bordered = addOcrBorder(canvas);
+    try {
+      const result = await worker.recognize(bordered);
+      return cleanOcrText(result.data.text, layout);
+    } finally {
+      disposeCanvas(bordered);
+    }
   }
 
   const splitY = findHorizontalSplit(canvas);
@@ -275,9 +301,14 @@ async function recognizeOcrCanvas(
         cropped.width,
         cropped.height,
       );
-      const result = await worker.recognize(cropped);
-      const text = cleanOcrText(result.data.text, layout);
-      if (text) texts.push(text);
+      const bordered = addOcrBorder(cropped);
+      try {
+        const result = await worker.recognize(bordered);
+        const text = cleanOcrText(result.data.text, layout);
+        if (text) texts.push(text);
+      } finally {
+        disposeCanvas(bordered);
+      }
     } finally {
       context.clearRect(0, 0, cropped.width, cropped.height);
       cropped.width = 1;
@@ -481,12 +512,18 @@ export async function extractJapaneseImage(
     }
     validateImageDimensions(bitmap.width, bitmap.height);
 
-    const scale = Math.min(1, MAX_OCR_DIMENSION / Math.max(bitmap.width, bitmap.height));
+    const longEdge = Math.max(bitmap.width, bitmap.height);
+    const scale = Math.min(
+      MAX_OCR_DIMENSION / longEdge,
+      Math.max(1, MIN_OCR_LONG_EDGE / longEdge),
+    );
     canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(bitmap.width * scale));
     canvas.height = Math.max(1, Math.round(bitmap.height * scale));
     const context = canvas.getContext('2d', { alpha: false });
     if (!context) throw new Error('IMAGE_DECODE_FAILED');
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
     context.fillStyle = '#ffffff';
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);

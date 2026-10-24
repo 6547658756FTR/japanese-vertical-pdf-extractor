@@ -31,7 +31,7 @@ const verticalPunctuation: Record<string, string> = {
   '︸': '｝', '︹': '〔', '︺': '〕', '︻': '【', '︼': '】',
   '︽': '《', '︾': '》', '︿': '〈', '﹀': '〉', '﹁': '「',
   '﹂': '」', '﹃': '『', '﹄': '』', '﹇': '［', '﹈': '］',
-  '︙': '…', '︰': '…',
+  '︙': '…', '︰': '…', '｢': '「', '｣': '」', 'ｰ': 'ー',
 };
 
 const japaneseChar = /[\u3000-\u30ff\u3400-\u9fff\uf900-\ufaff]/;
@@ -114,18 +114,36 @@ export function normalizeJapaneseText(value: string) {
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n[ \t]+/g, '\n')
     .replace(/\n{3,}/g, '\n\n');
+  // Vertical long-vowel marks are often recognized as thin strokes or 一.
+  // Limit recovery to katakana context so ordinary bars and kanji stay intact.
+  text = text
+    .replace(/(?<=[ァ-ヿｦ-ﾟ])[|｜丨︱︲一](?=[ァ-ヿｦ-ﾟ])/gu, 'ー')
+    .replace(/(?<=[ァ-ヿｦ-ﾟ])[|｜丨︱︲](?=[、。，．！？…「」『』）】〉》〕］\s]|$)/gu, 'ー');
   return text.trim();
 }
 
 /** Keep Japanese corner-bracket quotations intact even when extraction splits a column. */
 export function keepCornerQuotesOnOneLine(value: string) {
   const source = value.replace(/\r\n?/g, '\n');
+  const matchedOpenings = new Set<number>();
+  const matchedClosings = new Set<number>();
+  const openingStack: number[] = [];
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === '「') openingStack.push(index);
+    if (source[index] === '」' && openingStack.length) {
+      const opening = openingStack.pop();
+      if (opening !== undefined) {
+        matchedOpenings.add(opening);
+        matchedClosings.add(index);
+      }
+    }
+  }
   let result = '';
   let quoteDepth = 0;
 
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
-    if (character === '「') quoteDepth += 1;
+    if (character === '「' && matchedOpenings.has(index)) quoteDepth += 1;
 
     if (character === '\n' && quoteDepth > 0) {
       result = result.replace(/[ \t]+$/g, '');
@@ -134,7 +152,7 @@ export function keepCornerQuotesOnOneLine(value: string) {
     }
 
     result += character;
-    if (character === '」' && quoteDepth > 0) quoteDepth -= 1;
+    if (character === '」' && matchedClosings.has(index) && quoteDepth > 0) quoteDepth -= 1;
   }
 
   return result;
