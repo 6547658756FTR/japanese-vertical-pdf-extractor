@@ -2,6 +2,7 @@
 
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -13,11 +14,14 @@ import {
   Download,
   FileText,
   LockKeyhole,
+  Play,
+  Plus,
   RefreshCw,
   RotateCcw,
   ScanText,
   TextQuote,
   Upload,
+  X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -31,6 +35,7 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
+  combineExtractionResults,
   extractJapaneseSource,
   type ExtractionMode,
   type ExtractionProgress,
@@ -42,9 +47,13 @@ import {
   keepCornerQuotesOnOneLine,
   type FuriganaMode,
   type LayoutMode,
+  type PageLayoutMode,
 } from '@/lib/vertical-text';
 
-type AppStage = 'idle' | 'working' | 'done' | 'error';
+type AppStage = 'idle' | 'ready' | 'working' | 'done' | 'error';
+
+const MAX_BATCH_FILES = 50;
+const MAX_BATCH_BYTES = 300 * 1024 * 1024;
 
 const initialSettings: ExtractSettings = {
   mode: 'auto',
@@ -52,6 +61,7 @@ const initialSettings: ExtractSettings = {
   verticalOnly: true,
   pageBreaks: true,
   layout: 'paragraphs',
+  pageLayout: 'single',
 };
 
 function formatBytes(bytes: number) {
@@ -59,8 +69,9 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function downloadName(filename: string) {
-  const sanitized = filename
+function downloadName(files: File[]) {
+  if (files.length > 1) return `세로쓰기_${files.length}개파일.txt`;
+  const sanitized = (files[0]?.name ?? '추출결과')
     .normalize('NFC')
     .replace(/\.(?:pdf|png|jpe?g)$/i, '')
     .replace(/[<>:"/\\|?*]/g, '_');
@@ -87,9 +98,25 @@ function readableError(error: unknown) {
   return '파일을 처리하지 못했습니다. 파일이 손상되지 않았는지 확인해 주세요.';
 }
 
+function prepareInputFile(file: File, index: number) {
+  if (/\.(?:pdf|png|jpe?g)$/i.test(file.name)) return file;
+  const extension = file.type === 'image/png'
+    ? 'png'
+    : file.type === 'image/jpeg'
+      ? 'jpg'
+      : file.type === 'application/pdf'
+        ? 'pdf'
+        : undefined;
+  if (!extension) return file;
+  return new File([file], `붙여넣기-${Date.now()}-${index + 1}.${extension}`, {
+    type: file.type,
+    lastModified: file.lastModified,
+  });
+}
+
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [stage, setStage] = useState<AppStage>('idle');
   const [settings, setSettings] = useState<ExtractSettings>(initialSettings);
   const [progress, setProgress] = useState<ExtractionProgress>({
@@ -105,44 +132,99 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
-  const runExtraction = useCallback(async (target: File, nextSettings: ExtractSettings) => {
+  const runExtraction = useCallback(async (targets: File[], nextSettings: ExtractSettings) => {
+    if (!targets.length) return;
     setStage('working');
     setError('');
     setCopied(false);
     setResult(null);
     setText('');
     setProgress({ page: 0, total: 0, percent: 1, stage: 'analyzing', detail: '파일을 여는 중' });
+    let activeFilename = '';
     try {
-      const extracted = await extractJapaneseSource(target, nextSettings, setProgress);
-      if (!extracted.text) throw new Error('추출할 수 있는 문자가 없습니다');
-      setResult(extracted);
-      setText(extracted.text);
+      const extractedItems: ExtractionResult[] = [];
+      for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index];
+        activeFilename = target.name;
+        const extracted = await extractJapaneseSource(target, nextSettings, (nextProgress) => {
+          setProgress({
+            ...nextProgress,
+            percent: Math.min(100, Math.round(((index + nextProgress.percent / 100) / targets.length) * 100)),
+            detail: targets.length > 1
+              ? `${index + 1}/${targets.length} · ${target.name} · ${nextProgress.detail}`
+              : nextProgress.detail,
+          });
+        });
+        extractedItems.push(extracted);
+      }
+
+      const combinedResult = combineExtractionResults(extractedItems, nextSettings.pageBreaks);
+      if (!combinedResult.text) throw new Error('추출할 수 있는 문자가 없습니다');
+      setResult(combinedResult);
+      setText(combinedResult.text);
       setStage('done');
     } catch (nextError) {
-      setError(readableError(nextError));
+      setError(`${targets.length > 1 && activeFilename ? `${activeFilename}: ` : ''}${readableError(nextError)}`);
       setStage('error');
     }
   }, []);
 
-  const acceptFile = useCallback((nextFile: File | undefined) => {
-    if (!nextFile) return;
-    const hasAllowedName = /\.(?:pdf|png|jpe?g)$/i.test(nextFile.name);
-    if (!hasAllowedName) {
+  const acceptFiles = useCallback((incomingFiles: File[]) => {
+    if (!incomingFiles.length) return;
+    const prepared = incomingFiles.map(prepareInputFile);
+    const invalid = prepared.find((file) => !/\.(?:pdf|png|jpe?g)$/i.test(file.name));
+    if (invalid) {
       setError('PDF, PNG 또는 JPG 파일만 선택할 수 있습니다.');
-      setStage('error');
+      if (!files.length) setStage('error');
       return;
     }
-    if (nextFile.size > 100 * 1024 * 1024) {
+    const oversized = prepared.find((file) => file.size <= 0 || file.size > 100 * 1024 * 1024);
+    if (oversized) {
       setError('파일이 100MB를 넘습니다. 파일을 나누거나 용량을 줄인 뒤 다시 시도해 주세요.');
-      setStage('error');
+      if (!files.length) setStage('error');
       return;
     }
-    setFile(nextFile);
-    void runExtraction(nextFile, settings);
-  }, [runExtraction, settings]);
+    const nextFiles = [...files, ...prepared];
+    if (nextFiles.length > MAX_BATCH_FILES) {
+      setError(`한 번에 최대 ${MAX_BATCH_FILES}개까지 처리할 수 있습니다.`);
+      return;
+    }
+    if (nextFiles.reduce((sum, file) => sum + file.size, 0) > MAX_BATCH_BYTES) {
+      setError('선택한 파일의 총용량은 300MB 이하여야 합니다.');
+      return;
+    }
+    setFiles(nextFiles);
+    setStage('ready');
+    setResult(null);
+    setText('');
+    setError('');
+    setCopied(false);
+  }, [files]);
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || (target instanceof HTMLElement && target.isContentEditable)
+      ) return;
+      const pastedImages = Array.from(event.clipboardData?.items ?? [])
+        .filter((item) => item.kind === 'file' && /^image\/(?:png|jpeg)$/i.test(item.type))
+        .flatMap((item) => {
+          const file = item.getAsFile();
+          return file ? [file] : [];
+        });
+      if (!pastedImages.length) return;
+      event.preventDefault();
+      acceptFiles(pastedImages);
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [acceptFiles]);
 
   const reset = useCallback(() => {
-    setFile(null);
+    setFiles([]);
     setStage('idle');
     setResult(null);
     setText('');
@@ -150,6 +232,16 @@ export default function Home() {
     setCopied(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
+
+  const removeFile = useCallback((index: number) => {
+    const nextFiles = files.filter((_, fileIndex) => fileIndex !== index);
+    setFiles(nextFiles);
+    setResult(null);
+    setText('');
+    setError('');
+    setCopied(false);
+    setStage(nextFiles.length ? 'ready' : 'idle');
+  }, [files]);
 
   const copyText = useCallback(async () => {
     const safeText = keepCornerQuotesOnOneLine(text);
@@ -164,17 +256,17 @@ export default function Home() {
   }, [text]);
 
   const downloadText = useCallback(() => {
-    if (!file) return;
+    if (!files.length) return;
     const safeText = keepCornerQuotesOnOneLine(text);
     setText(safeText);
     const blob = new Blob([`\ufeff${safeText}`], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = downloadName(file.name);
+    anchor.download = downloadName(files);
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
-  }, [file, text]);
+  }, [files, text]);
 
   const addQuoteBreaks = useCallback(() => {
     setText((current) => addCornerQuoteBoundaryBreaks(current));
@@ -182,7 +274,8 @@ export default function Home() {
 
   const characterCount = useMemo(() => Array.from(text).length, [text]);
   const isWorking = stage === 'working';
-  const selectedFileIsImage = Boolean(file && /\.(?:png|jpe?g)$/i.test(file.name));
+  const selectedFilesAreImages = files.length > 0 && files.every((file) => /\.(?:png|jpe?g)$/i.test(file.name));
+  const totalBytes = useMemo(() => files.reduce((sum, file) => sum + file.size, 0), [files]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -203,7 +296,7 @@ export default function Home() {
         </div>
       </header>
 
-      {!file ? (
+      {!files.length ? (
         <section className="mx-auto grid max-w-7xl gap-10 px-5 py-10 sm:px-8 lg:grid-cols-[1.05fr_.95fr] lg:items-center lg:px-10 lg:py-16">
           <div className="max-w-xl">
             <div className="mb-6 flex items-center gap-3 text-xs font-semibold tracking-[.16em] text-vermilion">
@@ -239,7 +332,7 @@ export default function Home() {
                 onDrop={(event: DragEvent<HTMLButtonElement>) => {
                   event.preventDefault();
                   setIsDragging(false);
-                  acceptFile(event.dataTransfer.files[0]);
+                  acceptFiles(Array.from(event.dataTransfer.files));
                 }}
               >
                 <span>
@@ -247,9 +340,9 @@ export default function Home() {
                     <Upload className="size-7" strokeWidth={1.7} />
                   </span>
                   <span className="mt-6 block font-display text-xl font-semibold">PDF·PNG·JPG를 여기에 놓으세요</span>
-                  <span className="mt-2 block text-sm leading-6 text-muted-foreground">또는 눌러서 파일 선택 · 최대 100MB</span>
+                  <span className="mt-2 block text-sm leading-6 text-muted-foreground">여러 파일 선택 또는 Ctrl+V로 이미지 붙여넣기 · 파일당 최대 100MB</span>
                   <span className="mt-6 inline-flex h-9 items-center justify-center gap-2 rounded-sm bg-ink px-6 text-sm font-medium text-paper transition group-hover:bg-vermilion">
-                    <FileText className="size-4" /> PDF / 이미지 선택
+                    <FileText className="size-4" /> 파일 선택
                   </span>
                 </span>
               </button>
@@ -265,13 +358,18 @@ export default function Home() {
             <div className="flex min-w-0 items-center gap-3">
               <span className="grid size-11 shrink-0 place-items-center rounded-sm bg-vermilion/10 text-vermilion"><FileText className="size-5" /></span>
               <div className="min-w-0">
-                <p className="truncate font-semibold">{file.name}</p>
-                <p className="mt-0.5 text-xs text-muted-foreground">{formatBytes(file.size)} · {isWorking ? progress.detail : stage === 'done' ? '추출 완료' : '처리 중 오류'}</p>
+                <p className="truncate font-semibold">{files.length === 1 ? files[0].name : `${files.length}개 파일 선택됨`}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground">{formatBytes(totalBytes)} · {isWorking ? progress.detail : stage === 'done' ? '추출 완료' : stage === 'ready' ? '인식 대기' : '처리 중 오류'}</p>
               </div>
             </div>
-            <Button variant="outline" className="rounded-sm" onClick={reset} disabled={isWorking}>
-              <RotateCcw className="size-4" /> 다른 파일
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" className="rounded-sm" onClick={() => fileInputRef.current?.click()} disabled={isWorking}>
+                <Plus className="size-4" /> 파일 추가
+              </Button>
+              <Button variant="outline" className="rounded-sm" onClick={reset} disabled={isWorking}>
+                <RotateCcw className="size-4" /> 전체 비우기
+              </Button>
+            </div>
           </div>
 
           <div className="grid gap-6 lg:grid-cols-[300px_minmax(0,1fr)]">
@@ -289,6 +387,18 @@ export default function Home() {
                     </SelectContent>
                   </Select>
                   <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">자동은 글자가 없는 PDF 페이지만 OCR하며, 이미지는 항상 OCR합니다.</span>
+                </div>
+
+                <div>
+                  <span className="mb-2 block text-sm font-medium">페이지 구성</span>
+                  <Select value={settings.pageLayout} onValueChange={(value) => setSettings((current) => ({ ...current, pageLayout: value as PageLayoutMode }))} disabled={isWorking}>
+                    <SelectTrigger className="h-10 w-full rounded-sm bg-paper"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="single">일반 한 단</SelectItem>
+                      <SelectItem value="split-horizontal">상·하 두 단</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">두 단은 상단 전체를 우→좌로 읽은 다음 하단 전체를 우→좌로 읽습니다.</span>
                 </div>
 
                 <div>
@@ -318,13 +428,42 @@ export default function Home() {
                 <SettingSwitch label="페이지 사이 띄우기" description="이어지는 문장은 붙이고, 나머지 쪽 사이에 빈 줄을 넣습니다." checked={settings.pageBreaks} disabled={isWorking} onCheckedChange={(checked) => setSettings((current) => ({ ...current, pageBreaks: checked }))} />
               </div>
 
-              <Button className="mt-6 w-full rounded-sm bg-ink text-paper hover:bg-vermilion" disabled={isWorking} onClick={() => void runExtraction(file, settings)}>
-                <RefreshCw className={`size-4 ${isWorking ? 'animate-spin' : ''}`} /> 설정으로 다시 추출
+              <Button className="mt-6 w-full rounded-sm bg-ink text-paper hover:bg-vermilion" disabled={isWorking} onClick={() => void runExtraction(files, settings)}>
+                {stage === 'ready' ? <Play className="size-4" /> : <RefreshCw className={`size-4 ${isWorking ? 'animate-spin' : ''}`} />}
+                {stage === 'ready' ? '인식 시작' : '설정으로 다시 추출'}
               </Button>
-              <p className="mt-3 text-xs leading-5 text-muted-foreground">파일과 추출 결과는 브라우저 메모리에서만 처리되며 업로드·저장되지 않습니다.</p>
+              <p className="mt-3 text-xs leading-5 text-muted-foreground">선택·붙여넣기한 파일과 추출 결과는 브라우저 메모리에서만 처리되며 업로드·저장되지 않습니다.</p>
             </aside>
 
             <section className="min-w-0 rounded-md border border-ink/10 bg-card p-5 sm:p-6">
+              {stage === 'ready' && (
+                <div className="mx-auto flex min-h-[520px] max-w-2xl flex-col justify-center">
+                  <div className="text-center">
+                    <span className="mx-auto grid size-16 place-items-center rounded-full bg-vermilion/10 text-vermilion"><Clipboard className="size-7" /></span>
+                    <h2 className="mt-5 font-display text-2xl font-semibold">파일을 확인한 뒤 인식을 시작하세요</h2>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">아래 순서대로 처리합니다. 이 화면에서 Ctrl+V로 PNG·JPG 이미지를 더 붙여넣을 수 있습니다.</p>
+                  </div>
+                  <div className="mt-6 max-h-64 space-y-2 overflow-y-auto rounded-sm border border-ink/10 bg-paper/60 p-3">
+                    {files.map((selectedFile, index) => (
+                      <div key={`${selectedFile.name}-${selectedFile.size}-${selectedFile.lastModified}-${index}`} className="flex items-center gap-3 rounded-sm bg-card px-3 py-2.5">
+                        <span className="grid size-8 shrink-0 place-items-center rounded-sm bg-vermilion/10 text-xs font-semibold text-vermilion">{index + 1}</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">{selectedFile.name}</span>
+                          <span className="block text-xs text-muted-foreground">{formatBytes(selectedFile.size)}</span>
+                        </span>
+                        <Button type="button" variant="ghost" size="icon-sm" aria-label={`${selectedFile.name} 제거`} onClick={() => removeFile(index)}>
+                          <X className="size-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  {error && <p role="alert" className="mt-3 rounded-sm bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</p>}
+                  <Button className="mx-auto mt-6 rounded-sm bg-vermilion px-8 text-white hover:bg-vermilion/90" onClick={() => void runExtraction(files, settings)}>
+                    <Play className="size-4" /> {files.length}개 파일 인식 시작
+                  </Button>
+                </div>
+              )}
+
               {isWorking && (
                 <div className="grid min-h-[520px] place-items-center">
                   <div className="w-full max-w-md text-center">
@@ -333,7 +472,7 @@ export default function Home() {
                     <p aria-live="polite" className="mt-2 text-sm leading-6 text-muted-foreground">{progress.detail}</p>
                     <Progress value={progress.percent} className="mt-6 [&_[data-slot=progress-indicator]]:bg-vermilion" />
                     <div className="mt-2 flex justify-between text-xs text-muted-foreground">
-                      <span>{progress.total ? `${progress.page} / ${progress.total}${selectedFileIsImage ? '장' : '쪽'}` : '분석 중'}</span>
+                      <span>{files.length > 1 ? `${files.length}개 파일 순차 처리` : progress.total ? `${progress.page} / ${progress.total}${selectedFilesAreImages ? '장' : '쪽'}` : '분석 중'}</span>
                       <span>{progress.percent}%</span>
                     </div>
                   </div>
@@ -346,7 +485,7 @@ export default function Home() {
                     <span className="font-display text-5xl text-vermilion">読</span>
                     <h2 className="mt-5 text-xl font-semibold">추출을 마치지 못했습니다</h2>
                     <p role="alert" className="mt-3 text-sm leading-6 text-muted-foreground">{error}</p>
-                    <Button className="mt-6 rounded-sm" onClick={() => void runExtraction(file, settings)}><RefreshCw className="size-4" /> 다시 시도</Button>
+                    <Button className="mt-6 rounded-sm" onClick={() => void runExtraction(files, settings)}><RefreshCw className="size-4" /> 다시 시도</Button>
                   </div>
                 </div>
               )}
@@ -357,7 +496,7 @@ export default function Home() {
                     <div>
                       <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-emerald-700 text-white"><Check className="size-3.5" /></span><h2 className="font-semibold">추출된 텍스트</h2></div>
                       <p className="mt-2 text-xs text-muted-foreground">
-                        {result.pages}{result.sourceKind === 'image' ? '장' : '쪽'} · {characterCount.toLocaleString()}자{result.sourceKind === 'pdf' ? ` · 텍스트 ${result.textPages}쪽${result.ocrPages ? ` · OCR ${result.ocrPages}쪽` : ''}` : ' · 이미지 OCR'}{result.furiganaCharacters ? ` · 후리가나 ${result.furiganaCharacters}자 ${settings.furiganaMode === 'omit' ? '제외' : '표시'}` : ''}
+                        {files.length}개 파일 · {result.pages}{result.sourceKind === 'image' ? '장' : result.sourceKind === 'pdf' ? '쪽' : '개 면'} · {characterCount.toLocaleString()}자{result.sourceKind === 'pdf' ? ` · 텍스트 ${result.textPages}쪽${result.ocrPages ? ` · OCR ${result.ocrPages}쪽` : ''}` : result.sourceKind === 'image' ? ' · 이미지 OCR' : ` · 텍스트 ${result.textPages}쪽 · OCR ${result.ocrPages}개 면`}{result.furiganaCharacters ? ` · 후리가나 ${result.furiganaCharacters}자 ${settings.furiganaMode === 'omit' ? '제외' : '표시'}` : ''}
                       </p>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -388,7 +527,17 @@ export default function Home() {
         </section>
       )}
 
-      <input ref={fileInputRef} className="sr-only" type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" onChange={(event) => acceptFile(event.target.files?.[0])} />
+      <input
+        ref={fileInputRef}
+        className="sr-only"
+        type="file"
+        multiple
+        accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg"
+        onChange={(event) => {
+          acceptFiles(Array.from(event.target.files ?? []));
+          event.target.value = '';
+        }}
+      />
       <footer className="mx-auto flex max-w-7xl items-center justify-between border-t border-ink/10 px-5 py-5 text-xs text-muted-foreground sm:px-8 lg:px-10">
         <span>텍스트 레이어 우선 · 이미지/스캔 OCR</span>
         <span>최종 업데이트 · v1.0.0</span>

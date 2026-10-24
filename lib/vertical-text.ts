@@ -1,10 +1,12 @@
 export type LayoutMode = 'paragraphs' | 'columns';
+export type PageLayoutMode = 'single' | 'split-horizontal';
 export type FuriganaMode = 'omit' | 'parentheses';
 
 export type VerticalTextOptions = {
   furiganaMode: FuriganaMode;
   verticalOnly: boolean;
   layout: LayoutMode;
+  pageLayout: PageLayoutMode;
 };
 
 export type TextToken = {
@@ -52,6 +54,49 @@ function countJapanese(text: string) {
 function estimatedTokenBottom(token: TextToken) {
   const visibleCharacters = Math.max(1, countVisible(token.text));
   return token.y - Math.max(token.height, token.fontSize * visibleCharacters);
+}
+
+function splitHorizontalPageTokens(tokens: TextToken[]) {
+  if (tokens.length < 2) return undefined;
+  const referenceSize = Math.max(1, quantile(tokens.map((token) => token.fontSize), 0.72));
+  const positioned = tokens.map((token) => ({
+    token,
+    center: (token.y + estimatedTokenBottom(token)) / 2,
+    weight: Math.max(1, countVisible(token.text)),
+  })).sort((a, b) => a.center - b.center);
+  const totalWeight = positioned.reduce((sum, item) => sum + item.weight, 0);
+  const minimumWeight = Math.max(2, totalWeight * 0.18);
+  let lowerWeight = 0;
+  let bestGap = -1;
+  let bestBoundary: number | undefined;
+
+  for (let index = 0; index < positioned.length - 1; index += 1) {
+    lowerWeight += positioned[index].weight;
+    const upperWeight = totalWeight - lowerWeight;
+    if (lowerWeight < minimumWeight || upperWeight < minimumWeight) continue;
+    const gap = positioned[index + 1].center - positioned[index].center;
+    if (gap > bestGap) {
+      bestGap = gap;
+      bestBoundary = (positioned[index + 1].center + positioned[index].center) / 2;
+    }
+  }
+
+  const pageTop = Math.max(...tokens.map((token) => token.y));
+  const pageBottom = Math.min(...tokens.map(estimatedTokenBottom));
+  const geometricMiddle = (pageTop + pageBottom) / 2;
+  const boundary = bestBoundary !== undefined && bestGap >= referenceSize * 1.5
+    ? bestBoundary
+    : geometricMiddle;
+  let upper = tokens.filter((token) => (token.y + estimatedTokenBottom(token)) / 2 >= boundary);
+  let lower = tokens.filter((token) => (token.y + estimatedTokenBottom(token)) / 2 < boundary);
+
+  if (!upper.length || !lower.length) {
+    const middleIndex = Math.ceil(positioned.length / 2);
+    lower = positioned.slice(0, middleIndex).map((item) => item.token);
+    upper = positioned.slice(middleIndex).map((item) => item.token);
+  }
+  if (!upper.length || !lower.length) return undefined;
+  return { upper, lower };
 }
 
 export function normalizeJapaneseText(value: string) {
@@ -123,6 +168,21 @@ export function orderVerticalPage(
 ): OrderedPage {
   let tokens = rawTokens.filter((token) => countVisible(token.text) > 0 && token.fontSize > 0);
   if (!tokens.length) return { text: '', columns: 0, furiganaCharacters: 0 };
+
+  if (options.pageLayout === 'split-horizontal') {
+    const regions = splitHorizontalPageTokens(tokens);
+    if (regions) {
+      const regionOptions = { ...options, pageLayout: 'single' as const };
+      const upper = orderVerticalPage(regions.upper, regionOptions);
+      const lower = orderVerticalPage(regions.lower, regionOptions);
+      const separator = options.layout === 'columns' ? '\n' : '';
+      return {
+        text: normalizeJapaneseText([upper.text, lower.text].filter(Boolean).join(separator)),
+        columns: upper.columns + lower.columns,
+        furiganaCharacters: upper.furiganaCharacters + lower.furiganaCharacters,
+      };
+    }
+  }
 
   const weightedSizes = tokens.flatMap((token) =>
     Array.from({ length: Math.min(8, Math.max(1, countVisible(token.text))) }, () => token.fontSize),

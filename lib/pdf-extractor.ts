@@ -4,6 +4,7 @@ import {
   orderVerticalPage,
   type FuriganaMode,
   type LayoutMode,
+  type PageLayoutMode,
   type TextToken,
 } from './vertical-text';
 
@@ -15,6 +16,7 @@ export type ExtractSettings = {
   verticalOnly: boolean;
   pageBreaks: boolean;
   layout: LayoutMode;
+  pageLayout: PageLayoutMode;
 };
 
 export type ExtractionProgress = {
@@ -27,7 +29,7 @@ export type ExtractionProgress = {
 
 export type ExtractionResult = {
   text: string;
-  sourceKind: 'pdf' | 'image';
+  sourceKind: 'pdf' | 'image' | 'mixed';
   pages: number;
   characters: number;
   ocrPages: number;
@@ -138,6 +140,26 @@ export function joinExtractedPages(pageTexts: string[], pageBreaks: boolean) {
   }, pages[0]);
 }
 
+export function combineExtractionResults(
+  items: ExtractionResult[],
+  pageBreaks: boolean,
+): ExtractionResult {
+  const text = keepCornerQuotesOnOneLine(
+    joinExtractedPages(items.map((item) => item.text), pageBreaks),
+  ).trim();
+  const sourceKinds = new Set(items.map((item) => item.sourceKind));
+  return {
+    text,
+    sourceKind: sourceKinds.size === 1 ? items[0]?.sourceKind ?? 'image' : 'mixed',
+    pages: items.reduce((sum, item) => sum + item.pages, 0),
+    characters: Array.from(text).length,
+    ocrPages: items.reduce((sum, item) => sum + item.ocrPages, 0),
+    textPages: items.reduce((sum, item) => sum + item.textPages, 0),
+    columns: items.reduce((sum, item) => sum + item.columns, 0),
+    furiganaCharacters: items.reduce((sum, item) => sum + item.furiganaCharacters, 0),
+  };
+}
+
 async function createVerticalOcrWorker(onRecognizing: (progress: number) => void): Promise<OcrWorker> {
   const tesseract = await import('tesseract.js');
   const assetUrl = (path: string) => new URL(path, document.baseURI).toString();
@@ -193,6 +215,7 @@ async function ocrPage(
   },
   worker: { recognize(image: HTMLCanvasElement): Promise<{ data: { text: string } }> },
   layout: LayoutMode,
+  pageLayout: PageLayoutMode,
 ) {
   const base = page.getViewport({ scale: 1 });
   const maxDimension = 3200;
@@ -207,13 +230,111 @@ async function ocrPage(
     context.fillStyle = '#ffffff';
     context.fillRect(0, 0, canvas.width, canvas.height);
     await page.render({ canvas, canvasContext: context, viewport }).promise;
-    const result = await worker.recognize(canvas);
-    return cleanOcrText(result.data.text, layout);
+    return recognizeOcrCanvas(canvas, worker, layout, pageLayout);
   } finally {
     context.clearRect(0, 0, canvas.width, canvas.height);
     canvas.width = 1;
     canvas.height = 1;
   }
+}
+
+async function recognizeOcrCanvas(
+  canvas: HTMLCanvasElement,
+  worker: { recognize(image: HTMLCanvasElement): Promise<{ data: { text: string } }> },
+  layout: LayoutMode,
+  pageLayout: PageLayoutMode,
+) {
+  if (pageLayout === 'single') {
+    const result = await worker.recognize(canvas);
+    return cleanOcrText(result.data.text, layout);
+  }
+
+  const splitY = findHorizontalSplit(canvas);
+  const regions = [
+    { sourceY: 0, height: splitY },
+    { sourceY: splitY, height: Math.max(1, canvas.height - splitY) },
+  ];
+  const texts: string[] = [];
+  for (const region of regions) {
+    const cropped = document.createElement('canvas');
+    cropped.width = canvas.width;
+    cropped.height = region.height;
+    const context = cropped.getContext('2d', { alpha: false });
+    if (!context) throw new Error('페이지 이미지를 나눌 수 없습니다.');
+    try {
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, cropped.width, cropped.height);
+      context.drawImage(
+        canvas,
+        0,
+        region.sourceY,
+        canvas.width,
+        region.height,
+        0,
+        0,
+        cropped.width,
+        cropped.height,
+      );
+      const result = await worker.recognize(cropped);
+      const text = cleanOcrText(result.data.text, layout);
+      if (text) texts.push(text);
+    } finally {
+      context.clearRect(0, 0, cropped.width, cropped.height);
+      cropped.width = 1;
+      cropped.height = 1;
+    }
+  }
+  return texts.join(layout === 'columns' ? '\n' : '');
+}
+
+function findHorizontalSplit(canvas: HTMLCanvasElement) {
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const fallback = Math.max(1, Math.floor(canvas.height / 2));
+  if (!context || canvas.height < 20 || canvas.width < 20) return fallback;
+
+  const startY = Math.floor(canvas.height * 0.28);
+  const endY = Math.max(startY + 1, Math.ceil(canvas.height * 0.72));
+  const height = endY - startY;
+  const pixels = context.getImageData(0, startY, canvas.width, height).data;
+  const stepX = Math.max(1, Math.floor(canvas.width / 500));
+  const samplesPerRow = Math.ceil(canvas.width / stepX);
+  const darkCounts: number[] = [];
+  for (let y = 0; y < height; y += 1) {
+    let dark = 0;
+    for (let x = 0; x < canvas.width; x += stepX) {
+      const offset = (y * canvas.width + x) * 4;
+      const luminance = pixels[offset] * 0.2126
+        + pixels[offset + 1] * 0.7152
+        + pixels[offset + 2] * 0.0722;
+      if (luminance < 205) dark += 1;
+    }
+    darkCounts.push(dark);
+  }
+
+  const minimumInk = Math.min(...darkCounts);
+  const blankThreshold = minimumInk + Math.max(1, Math.floor(samplesPerRow * 0.006));
+  let bestStart = 0;
+  let bestLength = 0;
+  let runStart = -1;
+  for (let index = 0; index <= darkCounts.length; index += 1) {
+    const isBlank = index < darkCounts.length && darkCounts[index] <= blankThreshold;
+    if (isBlank && runStart < 0) runStart = index;
+    if ((!isBlank || index === darkCounts.length) && runStart >= 0) {
+      const length = index - runStart;
+      const runMiddle = runStart + length / 2;
+      const bestMiddle = bestStart + bestLength / 2;
+      const isBetter = length > bestLength
+        || (length === bestLength
+          && Math.abs(runMiddle - darkCounts.length / 2) < Math.abs(bestMiddle - darkCounts.length / 2));
+      if (isBetter) {
+        bestStart = runStart;
+        bestLength = length;
+      }
+      runStart = -1;
+    }
+  }
+  if (bestLength < 2) return fallback;
+  return Math.max(1, Math.min(canvas.height - 1, startY + Math.floor(bestStart + bestLength / 2)));
 }
 
 export async function extractJapanesePdf(
@@ -287,7 +408,7 @@ export async function extractJapanesePdf(
               });
             });
           }
-          pageTexts.push(await ocrPage(page, worker, settings.layout));
+          pageTexts.push(await ocrPage(page, worker, settings.layout, settings.pageLayout));
         } else {
           textPages += 1;
           onProgress({
@@ -386,8 +507,8 @@ export async function extractJapaneseImage(
         detail: `이미지 일본어 OCR ${Math.round(ocrProgress * 100)}%`,
       });
     });
-    const recognized = await worker.recognize(canvas);
-    const text = keepCornerQuotesOnOneLine(cleanOcrText(recognized.data.text, settings.layout)).trim();
+    const recognized = await recognizeOcrCanvas(canvas, worker, settings.layout, settings.pageLayout);
+    const text = keepCornerQuotesOnOneLine(recognized).trim();
     onProgress({ page: 1, total: 1, percent: 100, stage: 'text', detail: '추출 완료' });
     return {
       text,
