@@ -168,8 +168,15 @@ export function addCornerQuoteBoundaryBreaks(value: string) {
     .trim();
 }
 
+export function normalizeOcrStrokeMarks(value: string) {
+  return value.replace(/(?:[|｜丨︱︲][ \t\u3000]*)+/gu, (run) => {
+    const count = Array.from(run).filter((character) => /[|｜丨︱︲]/u.test(character)).length;
+    return 'ー'.repeat(count);
+  });
+}
+
 export function cleanOcrText(value: string, layout: LayoutMode) {
-  const blocks = value
+  const blocks = normalizeOcrStrokeMarks(value)
     .replace(/\r\n?/g, '\n')
     .split(/\n\s*\n/)
     .map((block) => block.split('\n').map((line) => line.trim()).filter(Boolean));
